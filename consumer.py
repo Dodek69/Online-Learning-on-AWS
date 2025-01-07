@@ -6,13 +6,12 @@ from river import metrics, datasets, preprocessing, compose, stream
 from sklearn import datasets as sk_datasets
 from deep_river import classification
 from torch import nn
-from torch import optim
 from torch import manual_seed
 import numpy as np
-
+import io
 
 pretraining = True
-
+_ = manual_seed(42)
 
 # Kafka consumer setup
 consumer = KafkaConsumer('image_topic', bootstrap_servers='localhost:9092')
@@ -62,17 +61,20 @@ if pretraining:
 # Consume messages and classify images
 iris_data = sk_datasets.load_iris()
 for msg in consumer:
-    print(msg.value)
-    image_data = np.frombuffer(msg.value, dtype=np.float32)
-    print(image_data)
+    image_data = msg.value
+    binary_file = io.BytesIO(msg.value)
+    image_data = np.load(binary_file)
 
     # Preprocess image data (example: scale)
-    x = stream.iter_array(np.expand_dims(image_data, 0), np.ndarray([0]), feature_names=iris_data.feature_names)
-    metric = metrics.Accuracy()
+    x = stream.iter_array(np.expand_dims(image_data, 0), np.array([0]), feature_names=iris_data.feature_names)
+    # metric = metrics.Accuracy()
 
     for i, j in x:
         print(f"{j} {i}")
         y_pred = model_pipeline.predict_one(i)
         metric.update(j, y_pred)
         model_pipeline.learn_one(i, j)
+
+    print(f"Accuracy: {metric.get():.4f}")
+
 
