@@ -1,6 +1,7 @@
 from kafka import KafkaConsumer
 from torch import manual_seed
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 import kagglehub
 from river import metrics, compose, stream, preprocessing
@@ -8,14 +9,16 @@ from deep_river import classification
 import numpy as np
 import cv2
 import os
+import pandas as pd
 
 
 
 PRETRAINING = True
 PRETRAINED_ACC = True
-IMAGE_SIZE = 320
-N_TRAIN_IMAGES = 200
+IMAGE_SIZE = 224
+N_TRAIN_IMAGES = 800
 N_TEST_IMAGES = 50
+N_EPOCHS = 12
 
 _ = manual_seed(101)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -32,9 +35,9 @@ def create_dataset(type: str, labels: [str], dataset_path: str, n_images=100):
             with open(file_path, 'rb') as f:
                 image_data = f.read()
             image_data = np.frombuffer(image_data, dtype=np.uint8)
-            image_data = (cv2.imdecode(image_data, cv2.IMREAD_GRAYSCALE) / 255.0).astype(np.float32)
+            image_data = (cv2.imdecode(image_data, cv2.IMREAD_COLOR) / 255.0).astype(np.float32)
 
-            image_data = cv2.resize(image_data, (320, 320))
+            image_data = cv2.resize(image_data, (IMAGE_SIZE, IMAGE_SIZE))
             image_data = image_data.reshape(-1)
             if tmp == 0 and l == 0:
                 X_train = image_data
@@ -57,30 +60,33 @@ class MyModule(nn.Module):
     def __init__(self, n_features):
         super(MyModule, self).__init__()
 
-        self.dense0 = nn.Linear(IMAGE_SIZE*IMAGE_SIZE, 1024)
-        self.dense1 = nn.Linear(1024, 512)
-        self.dense2 = nn.Linear(512, 128)
-        self.relu = nn.ReLU()
-        self.softmax = nn.Softmax()
-        self.dense3 = nn.Linear(256, 128)
-        self.dense4 = nn.Linear(128, 64)
-        self.dense5 = nn.Linear(64, n_features)
-        self.dropout = nn.Dropout(0.4)
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=100, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=100, out_channels=100, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(in_channels=100, out_channels=64, kernel_size=3, padding=1)
+        self.conv4 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
+        self.fc1 = nn.Linear(64 * 28 * 28, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, 32)
+        self.fc4 = nn.Linear(32, 1)
+        self.dropout1 = nn.Dropout(0.2)
+        self.dropout2 = nn.Dropout(0.3)
 
-    def forward(self, X):
-        X = nn.functional.relu(self.dense0(X))
-        X = nn.functional.relu(self.dense1(X))
-        X = self.dropout(X)
-        X = nn.functional.relu(self.dense2(X))
-        X = self.dropout(X)
-        X = nn.functional.relu(self.dense4(X))
-        X = nn.functional.softmax(self.dense5(X))
-        return X
+    def forward(self, x):
+        x = x.view(x.size(0), 3, IMAGE_SIZE, IMAGE_SIZE)
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = F.relu(self.conv3(x))
+        x = self.pool(F.relu(self.conv4(x)))
+        x = x.view(x.size(0), -1)
+        x = self.dropout1(F.relu(self.fc1(x)))
+        x = self.dropout2(F.relu(self.fc2(x)))
+        x = F.relu(self.fc3(x))
+        x = torch.sigmoid(self.fc4(x))
 
-model_pipeline = compose.Pipeline(
-    preprocessing.StandardScaler(),
-    classification.Classifier(module=MyModule, loss_fn="binary_cross_entropy", optimizer_fn='sgd')
-)
+        return x
+
+model = classification.Classifier(module=MyModule, loss_fn='binary_cross_entropy', optimizer_fn='adam', lr=0.001, is_class_incremental=False, device=device)
 
 # PRETRAINING
 
@@ -95,8 +101,15 @@ if PRETRAINING:
         X_train, Y_train, shuffle=True
     )
     print(f"Learning")
-    for x, y in train_dataset:
-        model_pipeline.learn_one(x, y)
+    n_batches = N_TRAIN_IMAGES // 32
+    for i in range(N_EPOCHS):
+        print(f"Epoch {i} / {}")
+        shuffled_indices = np.random.permutation(N_TRAIN_IMAGES)
+        shuffled_x = X_train[shuffled_indices]
+        shuffled_y = Y_train[shuffled_indices]
+        for i in range(n_batches):
+            batch_x, batch_y = shuffled_x[i * 32:(i + 1) * 32], shuffled_y[i * 32:(i + 1) * 32]
+            model.learn_many(pd.DataFrame(batch_x), pd.Series(batch_y))
 
     if PRETRAINED_ACC:
         X_test, Y_test = create_dataset('test', labels, dataset_path, N_TEST_IMAGES)
@@ -107,15 +120,17 @@ if PRETRAINING:
 
         print(f"Evaluating")
         for x, y in test_dataset:
-            y_pred = model_pipeline.predict_one(x)
+            y_pred = model.predict_one(x)
             metric.update(y_pred, y)
-            # print(model_pipeline.predict_proba_one(x))
+
+        print(f"Accuracy: {metric.get():.2f}")
 
 
 print("Waiting")
 
 tmp = 0
 for msg in consumer:
+    print(f"Analyzing new message")
     image_data = np.frombuffer(msg.value, dtype=np.uint8)
     image_data = (cv2.imdecode(image_data, cv2.IMREAD_GRAYSCALE) / 255.0).astype(np.float32)
 
@@ -125,11 +140,9 @@ for msg in consumer:
     x = stream.iter_array(np.expand_dims(image_data, 0), np.array([tmp%2]))
 
     for i, j in x:
-        y_pred = model_pipeline.predict_one(i)
+        y_pred = model.predict_one(i)
         metric.update(j, y_pred)
-        # print(f"{j} {y_pred}")
-        # print(model_pipeline.predict_proba_one(i))
-        model_pipeline.learn_one(i, j)
+        model.learn_one(i, j)
 
     print(f"Accuracy: {metric.get():.4f}")
     tmp += 1
