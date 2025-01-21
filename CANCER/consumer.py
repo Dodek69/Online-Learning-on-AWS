@@ -103,7 +103,7 @@ if PRETRAINING:
     print(f"Learning")
     n_batches = N_TRAIN_IMAGES // 32
     for i in range(N_EPOCHS):
-        print(f"Epoch {i} / {}")
+        print(f"Epoch {i} / {N_EPOCHS}")
         shuffled_indices = np.random.permutation(N_TRAIN_IMAGES)
         shuffled_x = X_train[shuffled_indices]
         shuffled_y = Y_train[shuffled_indices]
