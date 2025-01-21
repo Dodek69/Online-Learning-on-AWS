@@ -19,6 +19,7 @@ IMAGE_SIZE = 224
 N_TRAIN_IMAGES = 800
 N_TEST_IMAGES = 50
 N_EPOCHS = 12
+BATCH_SIZE = 32
 
 _ = manual_seed(101)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -101,14 +102,14 @@ if PRETRAINING:
         X_train, Y_train, shuffle=True
     )
     print(f"Learning")
-    n_batches = N_TRAIN_IMAGES // 32
+    n_batches = N_TRAIN_IMAGES // BATCH_SIZE
     for i in range(N_EPOCHS):
         print(f"Epoch {i} / {N_EPOCHS}")
         shuffled_indices = np.random.permutation(N_TRAIN_IMAGES)
         shuffled_x = X_train[shuffled_indices]
         shuffled_y = Y_train[shuffled_indices]
         for i in range(n_batches):
-            batch_x, batch_y = shuffled_x[i * 32:(i + 1) * 32], shuffled_y[i * 32:(i + 1) * 32]
+            batch_x, batch_y = shuffled_x[i * BATCH_SIZE:(i + 1) * BATCH_SIZE], shuffled_y[i * BATCH_SIZE:(i + 1) * BATCH_SIZE]
             model.learn_many(pd.DataFrame(batch_x), pd.Series(batch_y))
 
     if PRETRAINED_ACC:
@@ -132,7 +133,7 @@ tmp = 0
 for msg in consumer:
     print(f"Analyzing new message")
     image_data = np.frombuffer(msg.value, dtype=np.uint8)
-    image_data = (cv2.imdecode(image_data, cv2.IMREAD_GRAYSCALE) / 255.0).astype(np.float32)
+    image_data = (cv2.imdecode(image_data, cv2.IMREAD_COLOR) / 255.0).astype(np.float32)
 
     image_data = cv2.resize(image_data, (IMAGE_SIZE, IMAGE_SIZE))
     image_data = image_data.reshape(-1)
